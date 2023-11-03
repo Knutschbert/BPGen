@@ -25,13 +25,18 @@
 #include "EditorAssetLibrary.h"
 #include "Dom/JsonValue.h"
 #include "Dom/JsonObject.h"
+#include <Runtime/JsonUtilities/Public/JsonObjectConverter.h>
+//#include "JsonObjectConverter.h"
 #include "Serialization/JsonSerializer.h"
 #include "Misc/FileHelper.h"
+#include "Internationalization/Regex.h"
+
 
 
 static const FName BPGenTabName("BPGen");
 
 #define LOCTEXT_NAMESPACE "FBPGenModule"
+DEFINE_LOG_CATEGORY(LogBPGen)
 
 void FBPGenModule::StartupModule()
 {
@@ -262,6 +267,117 @@ static void CreateNodes() {
 	} else { UE_LOG(LogTemp, Error, TEXT("AssetGenOperation: Failed to create asset: %s"), *Name); }
 }
 
+static void ParseFunctionDescription(const FString& FunctionDescription, TMap<FString, FString>& ParamMap)
+{
+	// Regular expression pattern to match main description, @param tags, and their descriptions
+	FRegexPattern ParamPattern(TEXT("@param\\s+(\\w+)\\s+([^@\\n]+)(?:\\s*@return\\s+([^@\\n]+))?"));
+	FRegexMatcher ParamMatcher(ParamPattern, FunctionDescription);
+	//FRegexPattern ParamPattern(TEXT("((?:(?!@param).)*)@param\\s+(\\S+)\\s+(.+)"));
+
+	// If there are no @param tags, the whole string is the main description
+	if (!ParamMatcher.FindNext())
+	{
+		ParamMap.Add(TEXT("MainDescription"), FunctionDescription.TrimStartAndEnd());
+		return;
+	}
+
+	TArray<FString> Substrings;
+	FunctionDescription.ParseIntoArray(Substrings, TEXT("@"), true);
+	if (Substrings.Num())
+		ParamMap.Add(TEXT("MainDescription"), Substrings[0]);
+
+	// Capture parameter names and descriptions
+	do
+	{
+		FString ParamName = ParamMatcher.GetCaptureGroup(1);
+		FString ParamDescription = ParamMatcher.GetCaptureGroup(2);
+		ParamMap.Add(ParamName, ParamDescription.TrimStartAndEnd());
+	} while (ParamMatcher.FindNext());
+}
+
+static TArray<UProperty*> GetPropertiesFromClass(UClass* Class)
+{
+	TArray<UProperty*> Properties;
+
+	// Iterate through the class fields
+	for (TFieldIterator<UProperty> PropertyIt(Class, EFieldIteratorFlags::ExcludeSuper); PropertyIt; ++PropertyIt)
+	{
+		UProperty* Property = *PropertyIt;
+
+		// Check if the field is a property (variable)
+		if (Property->IsA(UProperty::StaticClass()))
+		{
+			Properties.Add(Property);
+		}
+	}
+
+	return Properties;
+}
+
+static FString GetStrippedClassName(UClass* Class)
+{
+	FString ClassName = Class->GetName();
+
+	// Check if the class is a Blueprint-generated class
+	if (Class && Class->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
+	{
+		// The class is a Blueprint-generated class, remove both U and A prefixes
+		ClassName.RemoveFromStart(TEXT("U"));
+		ClassName.RemoveFromStart(TEXT("A"));
+	}
+	else
+	{
+		// The class is not a Blueprint-generated class, remove only the U prefix
+		ClassName.RemoveFromStart(TEXT("U"));
+	}
+
+	return ClassName;
+}
+
+struct FTypeInfo
+{
+	FString OuterType;
+	bool bIsPointer;
+
+	FTypeInfo(const FString& Outer, bool IsPtr)
+		: OuterType(Outer), bIsPointer(IsPtr) {}
+};
+
+static TSharedPtr<FJsonObject> ParseCPPName(const FString& PropertyType)
+{
+	FRegexPattern TypePattern(TEXT("([A-Za-z_]+)\\s*(?:<([^<>]+)>\\s*)?(\\*?)"));
+	FRegexMatcher TypeMatcher(TypePattern, PropertyType);
+
+	FString OuterType;
+	FString InnerType;
+	bool bIsPointer = false;
+
+	// Extract outer type, inner type, and check for pointers using regular expressions
+	if (TypeMatcher.FindNext())
+	{
+		OuterType = TypeMatcher.GetCaptureGroup(1);
+		InnerType = TypeMatcher.GetCaptureGroup(2);
+		FString PointerMatch = TypeMatcher.GetCaptureGroup(3);
+
+		// If a pointer (*) is found, set bIsPointer to true
+		if (!PointerMatch.IsEmpty() && PointerMatch == TEXT("*"))
+		{
+			bIsPointer = true;
+		}
+	}
+
+	// Create a JSON object
+	TSharedPtr<FJsonObject> JsonObject = MakeShared<FJsonObject>();
+
+	// Add properties to the JSON object
+	JsonObject->SetStringField(TEXT("OuterType"), OuterType);
+	JsonObject->SetStringField(TEXT("InnerType"), InnerType);
+	JsonObject->SetBoolField(TEXT("IsPointer"), bIsPointer);
+
+	return JsonObject;
+}
+
+
 static void ExportFunctions() {
 	TSharedRef<FJsonObject> RootObject = MakeShareable(new FJsonObject);
 
@@ -273,11 +389,23 @@ static void ExportFunctions() {
 
 		TSharedRef<FJsonObject> ClassObject = MakeShareable(new FJsonObject);
 
+		TSharedRef<FJsonObject> PropertiesObject = MakeShareable(new FJsonObject);
 		TSharedRef<FJsonObject> FunctionsObject = MakeShareable(new FJsonObject);
+		TArray<UProperty*> properties = GetPropertiesFromClass(Class);
+		//Class->GetNativePropertyValues(tempPMap);
+		for (auto itr : properties)
+		{
+			FString PName = itr->GetName();
+			FString PType = itr->GetCPPType();
+			PropertiesObject->SetStringField(PName, PType);
+			//UE_LOG(LogBPGen, Log, TEXT("Name: %s, Type: %s"), *PName, *PType);
+		}
 
 		for (TFieldIterator<UFunction> FunctionIt(Class, EFieldIteratorFlags::ExcludeSuper); FunctionIt; ++FunctionIt) {
 			UFunction* Function = *FunctionIt;
-
+			FString tooltip = Function->GetMetaData("ToolTip");
+			TMap<FString, FString> tempMap;
+			ParseFunctionDescription(tooltip, tempMap);
 			TSharedRef<FJsonObject> FunctionObject = MakeShareable(new FJsonObject);
 
 			FunctionObject->SetBoolField("pure", Function->HasAnyFunctionFlags(FUNC_BlueprintPure));
@@ -298,9 +426,29 @@ static void ExportFunctions() {
 
 				const EEdGraphPinDirection Direction = bIsFunctionInput ? EGPD_Input : EGPD_Output;
 
-				PinObject->SetStringField("name", *Param->GetName());
+				PinObject->SetStringField("name", *Param->GetName().TrimStartAndEnd());
+				FString typeStr = *Param->GetCPPType().TrimStartAndEnd();
+				PinObject->SetStringField("type", typeStr);
+				PinObject->SetObjectField("type_parsed", ParseCPPName(typeStr));
+
+				
+				//PinObject->SetStringField("GetCPPTypeForwardDeclaration", *Param->GetMetaDataMap());
 				PinObject->SetStringField("direction", bIsFunctionInput ? "input" : "output");
 				PinObject->SetBoolField("isRef", bIsRefParam);
+				if (FString* tt = tempMap.Find(*Param->GetName()))
+					PinObject->SetStringField("tooltip", (*tt).TrimStartAndEnd());
+				const TMap<FName, FString>* metaData = Param->GetMetaDataMap();
+				if (metaData != nullptr)
+					for (auto itr : *metaData)
+						if (!itr.Value.IsEmpty())
+							PinObject->SetStringField(FString("PMeta_") + itr.Key.ToString(), itr.Value);
+				
+				FString ToolTip = Param->GetMetaData("ToolTip");
+				FString DisplayName = Param->GetMetaData("DisplayName");
+				FString Category = Param->GetMetaData("Category");
+				FString EditCondition = Param->GetMetaData("EditCondition");
+				FString SaveGame = Param->GetMetaData("SaveGame");
+				FString AssetRegistrySearchable = Param->GetMetaData("AssetRegistrySearchable");
 
 				// PinsObject->SetObjectField(*Param->GetName(), PinObject);
 				Pins.Add(MakeShareable(new FJsonValueObject(PinObject)));
@@ -365,17 +513,77 @@ static void ExportFunctions() {
 				bAllPinsGood = bAllPinsGood && bPinGood;
 				*/
 			}
+			
+			FunctionObject->SetStringField("tooltip", *tempMap.Find(L"MainDescription"));
 
-			// FunctionObject->SetObjectField("pins", PinsObject);
+			static const FString validMData[] = {
+				L"CommutativeAssociativeBinaryOperator",
+				L"CompactNodeTitle",
+				L"ShortToolTip",
+				L"DisplayName",
+				L"HidePin",
+				L"KeyWords"
+			};
+
+			for (auto itr : validMData)
+			{
+				FString val = Function->GetMetaData(*itr);
+				if (!val.IsEmpty())
+					FunctionObject->SetStringField(FString(L"FMeta_") + itr, *val);
+			}
+			// Only if there was something to parse
+			FString val = Function->GetMetaData("ToolTip");
+			if (!val.IsEmpty() && val.Len() > tempMap.Find(L"MainDescription")->Len())
+				FunctionObject->SetStringField(FString(L"FMeta_Tooltip"), *val);
+
 			FunctionObject->SetArrayField("pins", Pins);
-
 			FunctionsObject->SetObjectField(Function->GetName(), FunctionObject);
 		}
 
-		ClassObject->SetObjectField("functions", FunctionsObject);
+		if (FunctionsObject->Values.Num())
+		{
+			
+			//ClassObject->SetStringField("GetAuthoredName", Class->GetAuthoredName());
+			//ClassObject->SetStringField("StrippedName", GetStrippedClassName(Class));
+			//ClassObject->SetStringField("GetFName", Class->GetFName().ToString());
+			ClassObject->SetStringField("GetDisplayNameText", Class->GetDisplayNameText().ToString());
+			//ClassObject->SetStringField("GetFullGroupName", Class->GetFullGroupName(true));
+			ClassObject->SetStringField("GetDefaultObjectName", Class->GetDefaultObjectName().ToString());
+			//ClassObject->SetStringField("GetFullName", Class->GetFullName());
+			ClassObject->SetObjectField("properties", PropertiesObject);
+			ClassObject->SetObjectField("functions", FunctionsObject);
+			/*Classes->GetObjectField*/
 
-
-		Classes->SetObjectField(*Class->GetPathName(), ClassObject);
+			TArray<FString> Substrings;
+			Class->GetPathName().ParseIntoArray(Substrings, TEXT("."), true);
+			if (Substrings.Num() == 2)
+			{
+				
+				//if (field.IsValid())
+				if (Classes->HasField(Substrings[0]))
+				{
+					auto field = Classes->GetObjectField(Substrings[0]);
+					field->SetObjectField(Substrings[1], ClassObject);
+				}
+				else
+				{
+					TSharedRef<FJsonObject> field = MakeShareable(new FJsonObject);
+					field->SetObjectField(Substrings[1], ClassObject);
+					Classes->SetObjectField(Substrings[0], field);
+				}
+				/*if (field.IsValid() && field->Values.Num())
+					field->SetObjectField(Substrings[1], ClassObject);
+				else
+				{
+					field = MakeShareable(new FJsonObject);
+					field->SetObjectField(Substrings[1], ClassObject);
+					Classes->SetObjectField(Substrings[0], field);
+				}*/
+			}
+				//Classes->SetObjectField(*Class->GetPathName(), ClassObject);
+			else
+				Classes->SetObjectField(*Class->GetPathName(), ClassObject);
+		}
 		//Classes.Add(MakeShareable(new FJsonValueObject(ClassObject)));
 	}
 

@@ -8,6 +8,8 @@
 class FToolBarBuilder;
 class FMenuBuilder;
 
+DECLARE_LOG_CATEGORY_EXTERN(LogBPGen, All, All);
+
 class FBPGenModule : public IModuleInterface
 {
 public:
@@ -22,6 +24,8 @@ public:
 private:
 
 	void RegisterMenus();
+	
+	//void ParseFunctionDescription(const FString& FunctionDescription, TMap<FString, FString>& ParamMap);
 
 	TSharedRef<class SDockTab> OnSpawnPluginTab(const class FSpawnTabArgs& SpawnTabArgs);
 
