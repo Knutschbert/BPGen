@@ -295,17 +295,17 @@ static void ParseFunctionDescription(const FString& FunctionDescription, TMap<FS
 	} while (ParamMatcher.FindNext());
 }
 
-static TArray<UProperty*> GetPropertiesFromClass(UClass* Class)
+static TArray<FProperty*> GetPropertiesFromClass(UClass* Class)
 {
-	TArray<UProperty*> Properties;
+	TArray<FProperty*> Properties;
 
 	// Iterate through the class fields
-	for (TFieldIterator<UProperty> PropertyIt(Class, EFieldIteratorFlags::ExcludeSuper); PropertyIt; ++PropertyIt)
+	for (TFieldIterator<FProperty> PropertyIt(Class, EFieldIteratorFlags::ExcludeSuper); PropertyIt; ++PropertyIt)
 	{
-		UProperty* Property = *PropertyIt;
+		FProperty* Property = *PropertyIt;
 
 		// Check if the field is a property (variable)
-		if (Property->IsA(UProperty::StaticClass()))
+		if (Property->IsA(FProperty::StaticClass()))
 		{
 			Properties.Add(Property);
 		}
@@ -391,7 +391,7 @@ static void ExportFunctions() {
 
 		TSharedRef<FJsonObject> PropertiesObject = MakeShareable(new FJsonObject);
 		TSharedRef<FJsonObject> FunctionsObject = MakeShareable(new FJsonObject);
-		TArray<UProperty*> properties = GetPropertiesFromClass(Class);
+		TArray<FProperty*> properties = GetPropertiesFromClass(Class);
 		//Class->GetNativePropertyValues(tempPMap);
 		for (auto itr : properties)
 		{
