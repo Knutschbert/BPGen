@@ -514,27 +514,27 @@ static void ExportFunctions() {
 				*/
 			}
 			
-			FunctionObject->SetStringField("tooltip", *tempMap.Find(L"MainDescription"));
+			FunctionObject->SetStringField("tooltip", *tempMap.Find(TEXT("MainDescription")));
 
 			static const FString validMData[] = {
-				L"CommutativeAssociativeBinaryOperator",
-				L"CompactNodeTitle",
-				L"ShortToolTip",
-				L"DisplayName",
-				L"HidePin",
-				L"KeyWords"
+				TEXT("CommutativeAssociativeBinaryOperator"),
+				TEXT("CompactNodeTitle"),
+				TEXT("ShortToolTip"),
+				TEXT("DisplayName"),
+				TEXT("HidePin"),
+				TEXT("KeyWords")
 			};
 
 			for (auto itr : validMData)
 			{
 				FString val = Function->GetMetaData(*itr);
 				if (!val.IsEmpty())
-					FunctionObject->SetStringField(FString(L"FMeta_") + itr, *val);
+					FunctionObject->SetStringField(FString(TEXT("FMeta_")) + itr, *val);
 			}
 			// Only if there was something to parse
 			FString val = Function->GetMetaData("ToolTip");
-			if (!val.IsEmpty() && val.Len() > tempMap.Find(L"MainDescription")->Len())
-				FunctionObject->SetStringField(FString(L"FMeta_Tooltip"), *val);
+			if (!val.IsEmpty() && val.Len() > tempMap.Find(TEXT("MainDescription"))->Len())
+				FunctionObject->SetStringField(FString(TEXT("FMeta_Tooltip")), *val);
 
 			FunctionObject->SetArrayField("pins", Pins);
 			FunctionsObject->SetObjectField(Function->GetName(), FunctionObject);
